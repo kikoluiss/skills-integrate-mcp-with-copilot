@@ -5,11 +5,13 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
+import json
 import os
 from pathlib import Path
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -19,8 +21,8 @@ current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
 
-# In-memory activity database
-activities = {
+# Seed data used to initialize persistent storage on first run.
+SEED_ACTIVITIES = {
     "Chess Club": {
         "description": "Learn strategies and compete in chess tournaments",
         "schedule": "Fridays, 3:30 PM - 5:00 PM",
@@ -77,6 +79,42 @@ activities = {
     }
 }
 
+ACTIVITIES_FILE = current_dir / "data" / "activities.json"
+
+
+def _save_activities(data: dict) -> None:
+    """Persist activities atomically to disk."""
+    try:
+        ACTIVITIES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temp_file = ACTIVITIES_FILE.with_suffix(".tmp")
+        with temp_file.open("w", encoding="utf-8") as file:
+            json.dump(data, file, indent=2)
+        temp_file.replace(ACTIVITIES_FILE)
+    except OSError as error:
+        raise RuntimeError("Unable to save activities storage") from error
+
+
+def _load_activities() -> dict:
+    """Load activities from persistent storage."""
+    try:
+        with ACTIVITIES_FILE.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+    except OSError as error:
+        raise RuntimeError("Unable to read activities storage") from error
+    except json.JSONDecodeError as error:
+        raise RuntimeError("Activities storage is corrupted") from error
+
+    if not isinstance(data, dict):
+        raise RuntimeError("Activities storage must contain an object")
+
+    return data
+
+
+if not ACTIVITIES_FILE.exists():
+    _save_activities(SEED_ACTIVITIES)
+
+activities = _load_activities()
+
 
 @app.get("/")
 def root():
@@ -107,6 +145,15 @@ def signup_for_activity(activity_name: str, email: str):
 
     # Add student
     activity["participants"].append(email)
+    try:
+        _save_activities(activities)
+    except RuntimeError:
+        activity["participants"].remove(email)
+        raise HTTPException(
+            status_code=500,
+            detail="Could not persist signup"
+        )
+
     return {"message": f"Signed up {email} for {activity_name}"}
 
 
@@ -129,4 +176,13 @@ def unregister_from_activity(activity_name: str, email: str):
 
     # Remove student
     activity["participants"].remove(email)
+    try:
+        _save_activities(activities)
+    except RuntimeError:
+        activity["participants"].append(email)
+        raise HTTPException(
+            status_code=500,
+            detail="Could not persist unregistration"
+        )
+
     return {"message": f"Unregistered {email} from {activity_name}"}
